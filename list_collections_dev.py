@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import ScrollRequest
+from collections import defaultdict
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -57,7 +58,7 @@ def get_qclient():
             raise ConnectionError(f"Failed to connect to Qdrant server. Please check your URL and API key.\nOriginal error: {e}\nModified URL error: {e2}")
 
 def list_qdrant_collections():
-    """List all collections in Qdrant."""
+    """List all collections in Qdrant and analyze document metadata."""
     try:
         # Initialize Qdrant client with connection retry
         qdrant = get_qclient()
@@ -66,11 +67,11 @@ def list_qdrant_collections():
         collections = qdrant.get_collections()
         
         print(f"Collections in {ENV_NAME} environment:")
-        print("-" * 50)
+        print("-" * 80)
         
         if collections.collections:
-            print(f"{'Username':<15} {'Collection Name':<30} {'Point Count':<10}")
-            print("-" * 50)
+            print(f"{'Username':<15} {'Collection Name':<30} {'Point Count':<10} {'Unique Docs':<10}")
+            print("-" * 80)
             
             for collection in collections.collections:
                 # Extract username from collection name
@@ -81,18 +82,68 @@ def list_qdrant_collections():
                 collection_info = qdrant.get_collection(collection_name=collection.name)
                 point_count = collection_info.points_count if hasattr(collection_info, 'points_count') else 0
                 
-                # If points_count is not available, try to count using scroll with high limit
-                if point_count == 0 and hasattr(qdrant, 'scroll'):
-                    points = qdrant.scroll(
+                # Initialize document tracking
+                unique_documents = set()
+                
+                # Retrieve points with payload to analyze metadata
+                offset = None
+                batch_size = 100
+                all_processed = False
+                
+                while not all_processed:
+                    # Get batch of points with payload
+                    points, next_offset = qdrant.scroll(
                         collection_name=collection.name,
-                        limit=1000,  # Increased limit to get more points
-                        with_payload=False,
+                        limit=batch_size,
+                        offset=offset,
+                        with_payload=True,
                         with_vectors=False
-                    )[0]
+                    )
+                    
+                    # Process each point's metadata
+                    for point in points:
+                        # Check for metadata in the payload
+                        if point.payload:
+                            # First check if there's a metadata field
+                            if 'metadata' in point.payload and isinstance(point.payload['metadata'], dict):
+                                metadata = point.payload['metadata']
+                                # Look for document name in metadata
+                                if 'document_name' in metadata:
+                                    unique_documents.add(metadata['document_name'])
+                            # If no metadata or no document_name in metadata, try other fields
+                            else:
+                                # Check for common document field names directly in payload
+                                doc_name = None
+                                for field in ['document_name', 'name', 'filename', 'file_name', 'doc_name', 'title', 'source']:
+                                    if field in point.payload:
+                                        doc_name = point.payload[field]
+                                        break
+                                
+                                # If we found a document identifier, add it
+                                if doc_name:
+                                    unique_documents.add(doc_name)
+                    
+                    # Update for next iteration
+                    if next_offset and points:
+                        offset = next_offset
+                    else:
+                        all_processed = True
+                
+                # If no points were found with scroll, update point_count
+                if point_count == 0:
                     point_count = len(points) if points else 0
-                print(f"{username:<15} {collection_name:<30} {point_count:<10}")
+                
+                # Print results
+                print(f"{username:<15} {collection_name:<30} {point_count:<10} {len(unique_documents):<10}")
+                
+                # If unique documents were found, print them
+                if unique_documents:
+                    print("\nUnique documents in collection:", collection_name)
+                    for i, doc in enumerate(sorted(unique_documents), 1):
+                        print(f"  {i}. {doc}")
+                    print()
             
-            print("-" * 50)
+            print("-" * 80)
         else:
             print("No collections found")
             
